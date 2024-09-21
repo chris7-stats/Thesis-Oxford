@@ -1,0 +1,232 @@
+import os
+import sys
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.parallel
+import torch.backends.cudnn as cudnn
+import torch.optim as optim
+import torch.utils.data
+import torchvision.transforms as tfms
+import torchvision.datasets as datasets
+import torchvision.utils as utils
+import matplotlib.pyplot as plt
+
+USE_CUDA = False
+DATA_DIR = './dataset'
+BATCH_SIZE = 64
+IMG_CHANNELS = 1
+LATENT_DIM = 128
+GENERATOR_DIM = 128
+IMG_SIZE = 32
+DISCRIMINATOR_DIM = 128
+NUM_EPOCHS = 10
+LABEL_REAL = 1.0
+LABEL_FAKE = 0.0
+learning_rate = 1e-4
+random_seed = 42
+
+USE_CUDA = USE_CUDA and torch.cuda.is_available()
+print(f"PyTorch Version: {torch.__version__}")
+if USE_CUDA:
+    print(f"CUDA Version: {torch.version.cuda}\n")
+    torch.cuda.manual_seed(random_seed)
+
+device = torch.device("cuda:0" if USE_CUDA else "cpu")
+cudnn.benchmark = True
+
+# Data preprocessing
+mnist_dataset = datasets.MNIST(root=DATA_DIR, download=True,
+                               transform=tfms.Compose([
+                                   tfms.Resize(IMG_SIZE),
+                                   tfms.ToTensor(),
+                                   tfms.Normalize((0.5,), (0.5,))
+                               ]))
+
+data_loader = torch.utils.data.DataLoader(mnist_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+
+def init_weights(layer):
+    layer_type = layer.__class__.__name__
+    if layer_type.find('Conv') != -1:
+        layer.weight.data.normal_(0.0, 0.02)
+    elif layer_type.find('BatchNorm') != -1:
+        layer.weight.data.normal_(1.0, 0.02)
+        layer.bias.data.fill_(0)
+
+class GenNet(nn.Module):
+    def __init__(self):
+        super(GenNet, self).__init__()
+        self.network = nn.Sequential(
+            nn.ConvTranspose2d(LATENT_DIM, GENERATOR_DIM * 8, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(GENERATOR_DIM * 8),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(GENERATOR_DIM * 8, GENERATOR_DIM * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(GENERATOR_DIM * 4),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(GENERATOR_DIM * 4, GENERATOR_DIM * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(GENERATOR_DIM * 2),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(GENERATOR_DIM * 2, GENERATOR_DIM, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(GENERATOR_DIM),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(GENERATOR_DIM, IMG_CHANNELS, 4, 2, 1, bias=False),
+            nn.Tanh()
+        )
+
+    def forward(self, input):
+        return self.network(input)
+
+class DiscNet(nn.Module):
+    def __init__(self):
+        super(DiscNet, self).__init__()
+        self.network = nn.Sequential(
+            nn.Conv2d(IMG_CHANNELS, DISCRIMINATOR_DIM, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(DISCRIMINATOR_DIM, DISCRIMINATOR_DIM * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(DISCRIMINATOR_DIM * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(DISCRIMINATOR_DIM * 2, DISCRIMINATOR_DIM * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(DISCRIMINATOR_DIM * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(DISCRIMINATOR_DIM * 4, DISCRIMINATOR_DIM * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(DISCRIMINATOR_DIM * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(DISCRIMINATOR_DIM * 8, 1, 4, 1, 0, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, input):
+        return self.network(input).view(-1, 1).squeeze(1)
+
+# Create generator and discriminator
+gen_model = GenNet().to(device)
+gen_model.apply(init_weights)
+print(gen_model)
+
+disc_model = DiscNet().to(device)
+disc_model.apply(init_weights)
+print(disc_model)
+
+# Loss and optimizers
+bce_loss = nn.BCELoss()
+fixed_noise = torch.randn(BATCH_SIZE, LATENT_DIM, 1, 1, device=device)
+
+opt_disc = optim.Adam(disc_model.parameters(), lr=learning_rate, betas=(0.5, 0.999))
+opt_gen = optim.Adam(gen_model.parameters(), lr=learning_rate, betas=(0.5, 0.999))
+
+# Training loop
+images_list = []
+gen_losses = []
+disc_losses = []
+iteration = 0
+
+print("Starting Training...")
+for epoch in range(NUM_EPOCHS):
+
+    if epoch == 30 or epoch == 70:
+        plot_progress(epoch, fixed_noise, netG, device)
+    for batch_idx, data in enumerate(data_loader, 0):
+
+        # Update Discriminator
+        disc_model.zero_grad()
+        real_imgs = data[0].to(device)
+        batch_size = real_imgs.size(0)
+        real_labels = torch.full((batch_size,), LABEL_REAL, dtype=torch.float, device=device)
+        
+        output_real = disc_model(real_imgs).view(-1)
+        disc_loss_real = bce_loss(output_real, real_labels)
+        disc_loss_real.backward()
+        D_x = output_real.mean().item()
+
+        # Generate fake images and update Discriminator
+        noise = torch.randn(batch_size, LATENT_DIM, 1, 1, device=device)
+        fake_imgs = gen_model(noise)
+        fake_labels = torch.full((batch_size,), LABEL_FAKE, dtype=torch.float, device=device)
+        
+        output_fake = disc_model(fake_imgs.detach()).view(-1)
+        disc_loss_fake = bce_loss(output_fake, fake_labels)
+        disc_loss_fake.backward()
+        D_G_z1 = output_fake.mean().item()
+        disc_loss = disc_loss_real + disc_loss_fake
+        opt_disc.step()
+
+        # Update Generator
+        gen_model.zero_grad()
+        real_labels.fill_(LABEL_REAL)
+        output_fake_gen = disc_model(fake_imgs).view(-1)
+        gen_loss = bce_loss(output_fake_gen, real_labels)
+        gen_loss.backward()
+        D_G_z2 = output_fake_gen.mean().item()
+        opt_gen.step()
+
+        # Log losses
+        if batch_idx % 50 == 0:
+            print(f"[{epoch}/{NUM_EPOCHS}][{batch_idx}/{len(data_loader)}] Disc Loss: {disc_loss:.4f} Gen Loss: {gen_loss:.4f} D(x): {D_x:.4f} D(G(z)): {D_G_z1:.4f} / {D_G_z2:.4f}")
+
+        # Save generated images for visualization
+        gen_losses.append(gen_loss.item())
+        disc_losses.append(disc_loss.item())
+        if iteration % 500 == 0 or (epoch == NUM_EPOCHS-1 and batch_idx == len(data_loader)-1):
+            with torch.no_grad():
+                fake_imgs = gen_model(fixed_noise).detach().cpu()
+            images_list.append(utils.make_grid(fake_imgs, padding=2, normalize=True))
+
+        iteration += 1
+
+save_final_images(netG, fixed_noise, device, path="final_images.png")
+
+
+
+import torch
+import torchvision.utils as vutils
+import matplotlib.pyplot as plt
+
+# Function to plot images at different training stages
+def plot_progress(epoch, fixed_noise, generator, device):
+    # Switch generator to evaluation mode (if using batchnorm layers)
+    generator.eval()
+    
+    # Generate fake images using fixed noise
+    with torch.no_grad():
+        fake_images = generator(fixed_noise).detach().cpu()
+
+    # Create a grid of images
+    grid = vutils.make_grid(fake_images, padding=2, normalize=True)
+
+    # Plot the grid of generated images
+    plt.figure(figsize=(10,5))
+    plt.axis("off")
+    plt.title(f"Generated Images after {epoch} Epochs")
+    plt.imshow(np.transpose(grid, (1,2,0)))
+    plt.show()
+
+# Function to save final generated images after training
+def save_final_images(generator, fixed_noise, device, path="final_images.png"):
+    # Switch generator to evaluation mode
+    generator.eval()
+
+    # Generate final fake images using the fixed noise
+    with torch.no_grad():
+        fake_images = generator(fixed_noise).detach().cpu()
+
+    # Create a grid of generated images
+    grid = vutils.make_grid(fake_images, padding=2, normalize=True)
+
+    # Save the image grid
+    vutils.save_image(grid, path)
+
+    # Also display the final generated images
+    plt.figure(figsize=(8,8))
+    plt.axis("off")
+    plt.title("Final Generated Images")
+    plt.imshow(np.transpose(grid, (1, 2, 0)))
+    plt.show()
+
