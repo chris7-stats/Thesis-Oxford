@@ -1,0 +1,27 @@
+# Import the required libraries
+import torch
+import torchvision
+from torchvision import transforms
+import matplotlib.pyplot as plt
+
+# Define a transform to normalize the data
+transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+
+# Download and load the training dataset
+train_dataset = torchvision.datasets.MNIST(root='./data', train=True, transform=transform, download=True)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
+
+# Extract a batch of unique images
+unique_images, unique_labels = next(iter(train_loader))
+unique_images = unique_images.numpy()
+
+# Display a grid of unique images
+fig, axes = plt.subplots(4, 16, figsize=(16, 4), sharex=True, sharey=True)  # Create a 4x16 grid of subplots with a wider figure
+
+for i in range(4):  # Loop over rows
+    for j in range(16):  # Loop over columns
+        index = i * 16 + j  # Calculate the index in the batch
+        axes[i, j].imshow(unique_images[index].squeeze(), cmap='gray')  # Show the image using a grayscale colormap
+        axes[i, j].axis('off')  # Turn off axis labels and ticks
+
+plt.show()  # Display the plot
