@@ -1,0 +1,39 @@
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Create timesteps
+timesteps = np.linspace(0, 100, 100)
+
+# Generate sample values for each schedule
+beta_t = np.linspace(0.01, 0.1, 100)
+sqrt_beta_t = np.sqrt(beta_t)
+alpha_t = 1 - beta_t
+alphabar_t = np.cumprod(alpha_t)
+sqrtab = np.sqrt(alphabar_t)
+sqrtmab = np.sqrt(1 - alphabar_t)
+
+# Plot with more refined aesthetics
+plt.figure(figsize=(10, 7))
+
+# Plot each curve
+plt.plot(timesteps, beta_t, label=r'$\beta_t$', color='#1f77b4', linewidth=2)
+plt.plot(timesteps, sqrt_beta_t, label=r'$\sqrt{\beta_t}$', color='#ff7f0e', linewidth=2)
+plt.plot(timesteps, alpha_t, label=r'$\alpha_t$', color='#2ca02c', linewidth=2)
+plt.plot(timesteps, alphabar_t, label=r'$\bar{\alpha_t}$', color='#d62728', linewidth=2)
+plt.plot(timesteps, sqrtab, label=r'$\sqrt{\bar{\alpha_t}}$', color='#9467bd', linewidth=2)
+plt.plot(timesteps, sqrtmab, label=r'$\sqrt{1-\bar{\alpha_t}}$', color='#8c564b', linewidth=2)
+
+# Enhanced aesthetics
+plt.title('Beta Schedules', fontsize=16, weight='bold')
+plt.xlabel('Timestep', fontsize=14)
+plt.ylabel('Value', fontsize=14)
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.xlim(0, 100)
+plt.ylim(0, 1.1)
+
+# Improved legend positioning and styling
+plt.legend(loc='upper right', fontsize=12, frameon=True, fancybox=True, framealpha=0.7)
+
+# Show the refined plot
+plt.tight_layout()
+plt.show()
