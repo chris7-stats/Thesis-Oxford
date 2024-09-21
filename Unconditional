@@ -1,0 +1,250 @@
+import torch
+import torch.nn as nn
+import numpy as np
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from keras.datasets.mnist import load_data
+from custom_unet import SimpleUNet  # Assume this is a U-Net variant you've defined elsewhere
+
+# Load and normalize the MNIST dataset
+(train_data, train_labels), (test_data, test_labels) = load_data()
+train_data = np.float32(train_data) / 255.
+test_data = np.float32(test_data) / 255.
+
+# Function to sample random batches
+def get_batch(batch_size, device):
+    idx = torch.randperm(train_data.shape[0])[:batch_size]
+    images = torch.from_numpy(train_data[idx]).unsqueeze(1).to(device)
+    return torch.nn.functional.interpolate(images, 32)
+
+
+import torch
+import torch.nn as nn
+import math
+import numpy as np
+
+# Custom sinusoidal positional embedding function for timesteps
+def timestep_embedding(t, dim: int):
+    """
+    Create sinusoidal embeddings for time steps.
+    """
+    half_dim = dim // 2
+    emb_scale = math.log(10000) / (half_dim - 1)
+    emb = torch.exp(torch.arange(half_dim, dtype=torch.float32, device=t.device) * -emb_scale)
+    emb = t.float()[:, None] * emb[None, :]
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+
+    if dim % 2 == 1:
+        emb = torch.nn.functional.pad(emb, (0, 1), mode='constant')
+
+    return emb
+
+# Downsampling block for reducing spatial dimensions
+class DownBlock(nn.Module):
+    def __init__(self, in_channels):
+        super(DownBlock, self).__init__()
+        self.conv = nn.Conv2d(in_channels, in_channels, 3, stride=2, padding=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+# Upsampling block for increasing spatial dimensions
+class UpBlock(nn.Module):
+    def __init__(self, in_channels):
+        super(UpBlock, self).__init__()
+        self.conv = nn.Conv2d(in_channels, in_channels, 3, stride=1, padding=1)
+
+    def forward(self, x):
+        return self.conv(nn.functional.interpolate(x, scale_factor=2, mode='nearest'))
+
+# Nin (Network in Network) block
+class NinBlock(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super(NinBlock, self).__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+        self.bias = nn.Parameter(torch.zeros(out_dim))
+
+    def forward(self, x):
+        return torch.einsum('bchw, co->bohw', x, self.linear.weight) + self.bias
+
+# Residual Block with Timestep Embedding
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.fc = nn.Linear(512, out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.nonlinear = torch.nn.SiLU()
+        if in_channels != out_channels:
+            self.skip_conv = NinBlock(in_channels, out_channels)
+
+    def forward(self, x, t_emb):
+        h = self.nonlinear(nn.functional.group_norm(x, num_groups=32))
+        h = self.conv1(h)
+        h += self.fc(self.nonlinear(t_emb))[:, :, None, None]
+        h = self.nonlinear(nn.functional.group_norm(h, num_groups=32))
+        h = self.conv2(h)
+        if hasattr(self, 'skip_conv'):
+            x = self.skip_conv(x)
+        return x + h
+
+# Attention block with skip connection
+class AttentionBlock(nn.Module):
+    def __init__(self, channels):
+        super(AttentionBlock, self).__init__()
+        self.query_proj = NinBlock(channels, channels)
+        self.key_proj = NinBlock(channels, channels)
+        self.value_proj = NinBlock(channels, channels)
+        self.out_proj = NinBlock(channels, channels)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        q = self.query_proj(x)
+        k = self.key_proj(x)
+        v = self.value_proj(x)
+
+        attention = torch.einsum('bchw,bcHW->bhwHW', q, k) * (C ** -0.5)
+        attention = torch.nn.functional.softmax(attention.view(B, H, W, -1), dim=-1).view(B, H, W, H, W)
+        out = torch.einsum('bhwHW,bcHW->bchw', attention, v)
+        return x + self.out_proj(out)
+
+# UNet architecture for the diffusion model
+class SimpleUNet(nn.Module):
+    def __init__(self, base_channels=128, input_channels=1):
+        super(SimpleUNet, self).__init__()
+
+        self.base_channels = base_channels
+        self.timestep_fc1 = nn.Linear(base_channels, 4 * base_channels)
+        self.timestep_fc2 = nn.Linear(4 * base_channels, 4 * base_channels)
+
+        self.input_conv = nn.Conv2d(input_channels, base_channels, 3, padding=1)
+
+        self.encoder_blocks = nn.ModuleList([
+            ResidualBlock(base_channels, base_channels),
+            ResidualBlock(base_channels, base_channels),
+            DownBlock(base_channels),
+            ResidualBlock(base_channels, 2 * base_channels),
+            AttentionBlock(2 * base_channels),
+            ResidualBlock(2 * base_channels, 2 * base_channels),
+            AttentionBlock(2 * base_channels),
+            DownBlock(2 * base_channels),
+            ResidualBlock(2 * base_channels, 2 * base_channels)
+        ])
+
+        self.middle_blocks = nn.ModuleList([
+            ResidualBlock(2 * base_channels, 2 * base_channels),
+            AttentionBlock(2 * base_channels),
+            ResidualBlock(2 * base_channels, 2 * base_channels)
+        ])
+
+        self.decoder_blocks = nn.ModuleList([
+            ResidualBlock(4 * base_channels, 2 * base_channels),
+            ResidualBlock(4 * base_channels, 2 * base_channels),
+            Upsample(2 * base_channels),
+            ResidualBlock(4 * base_channels, 2 * base_channels),
+            AttentionBlock(2 * base_channels),
+            Upsample(2 * base_channels),
+            ResidualBlock(3 * base_channels, base_channels),
+            AttentionBlock(base_channels),
+            Upsample(base_channels)
+        ])
+
+        self.output_conv = nn.Conv2d(base_channels, input_channels, 3, padding=1)
+
+    def forward(self, x, t):
+        t_emb = timestep_embedding(t, self.base_channels)
+        t_emb = torch.nn.functional.silu(self.timestep_fc1(t_emb))
+        t_emb = self.timestep_fc2(t_emb)
+
+        # Encode
+        hs = []
+        h = self.input_conv(x)
+        for block in self.encoder_blocks:
+            h = block(h, t_emb)
+            hs.append(h)
+
+        # Middle
+        for block in self.middle_blocks:
+            h = block(h, t_emb)
+
+        # Decode
+        for block, skip in zip(self.decoder_blocks, reversed(hs)):
+            h = torch.cat((h, skip), dim=1)
+            h = block(h, t_emb)
+
+        h = nn.functional.silu(nn.functional.group_norm(h, num_groups=32))
+        return self.output_conv(h)
+
+
+# Define the diffusion model class
+class SimpleDiffusion:
+
+    def __init__(self, time_steps: int, model: nn.Module, device: str):
+        self.time_steps = time_steps
+        self.model = model.to(device)
+        self.device = device
+
+        self.beta_vals = torch.linspace(1e-4, 0.02, time_steps).to(device)
+        self.alpha_vals = 1. - self.beta_vals
+        self.alpha_bar_vals = torch.cumprod(self.alpha_vals, dim=0)
+
+    def train_step(self, batch_size, optimizer):
+        """
+        Training step for denoising diffusion.
+        """
+        original_images = get_batch(batch_size, self.device)
+        time_indices = torch.randint(1, self.time_steps + 1, (batch_size,), device=self.device,
+                                     dtype=torch.long)
+        noise = torch.randn_like(original_images)
+
+        # Perform gradient descent step
+        alpha_bar_t = self.alpha_bar_vals[time_indices - 1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+        predicted_noise = self.model(torch.sqrt(alpha_bar_t) * original_images + torch.sqrt(1 - alpha_bar_t) * noise, time_indices - 1)
+        loss = nn.functional.mse_loss(noise, predicted_noise)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        return loss.item()
+
+    @torch.no_grad()
+    def generate_samples(self, n_images=1, channels=1, img_dims=(32, 32), use_progress=True):
+        """
+        Generates samples from the diffusion process.
+        """
+        x = torch.randn((n_images, channels, img_dims[0], img_dims[1]), device=self.device)
+        progress = tqdm if use_progress else lambda x: x
+        for t in progress(range(self.time_steps, 0, -1)):
+            z = torch.randn_like(x) if t > 1 else torch.zeros_like(x)
+            time_tensor = torch.ones(n_images, dtype=torch.long, device=self.device) * t
+
+            beta_t = self.beta_vals[time_tensor - 1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+            alpha_t = self.alpha_vals[time_tensor - 1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+            alpha_bar_t = self.alpha_bar_vals[time_tensor - 1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+
+            mean_pred = 1 / torch.sqrt(alpha_t) * (x - ((1 - alpha_t) / torch.sqrt(1 - alpha_bar_t)) * self.model(x, time_tensor - 1))
+            sigma_t = torch.sqrt(beta_t)
+            x = mean_pred + sigma_t * z
+        return x
+
+
+if __name__ == "__main__":
+    device = 'cuda'
+    batch_size = 64
+    unet_model = SimpleUNet()  # This assumes a simplified U-Net architecture
+    optimizer = torch.optim.Adam(unet_model.parameters(), lr=2e-5)
+    diffusion = SimpleDiffusion(1000, unet_model, device)
+
+    # Training loop
+    for epoch in tqdm(range(40000)):
+        loss = diffusion.train_step(batch_size, optimizer)
+
+    # Generate and plot results
+    total_samples = 81
+    generated_images = diffusion.generate_samples(n_images=total_samples, use_progress=False)
+    plt.figure(figsize=(17, 17))
+    for idx in range(total_samples):
+        plt.subplot(9, 9, 1 + idx)
+        plt.axis('off')
+        plt.imshow(generated_images[idx].squeeze(0).clip(0, 1).cpu().numpy(), cmap='gray')
+    plt.savefig(f'generated_images/samples.png')
