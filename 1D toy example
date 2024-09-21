@@ -1,0 +1,64 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Target value and settings
+target_value = 7
+timesteps = 150
+noise_std = 1.0  # Larger noise to see spread more clearly
+
+# Forward diffusion process (adds noise to the data)
+def forward_process(x0, t, noise_std):
+    noise = np.random.randn() * noise_std * (t / timesteps)
+    return x0 + noise
+
+# Reverse denoising process (gradually removes noise)
+def reverse_process(x, t, target, lr=0.05):
+    noise_scale = (timesteps - t) / timesteps
+    gradient = -(x - target)  # Gradient to move towards the target
+    return x + lr * gradient * noise_scale
+
+# Initialize arrays to store data
+x0 = target_value  # Start at 7 for forward process
+forward_data = [x0]
+reverse_data = []
+
+# Forward process (adding noise)
+x = x0
+for t in range(timesteps):
+    x = forward_process(x, t, noise_std)
+    forward_data.append(x)
+
+# The noisy value after the forward process
+final_noisy_value = forward_data[-1]
+
+# Reverse process (denoising towards target 7 from the noisy value)
+x = final_noisy_value  # Start from the noisiest value (end of forward process)
+reverse_data.append(x)
+for t in range(timesteps):
+    x = reverse_process(x, t, target_value)
+    reverse_data.append(x)
+
+# Create a 1x2 layout
+fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+
+# Plot 1: Forward Process (Left)
+axs[0].plot(forward_data, color='blue', lw=2)
+axs[0].axhline(target_value, color='red', linestyle='--', label="Target value (7)")
+axs[0].axhline(final_noisy_value, color='green', linestyle='--', label=f"Final noisy value ({final_noisy_value:.2f})")
+axs[0].set_title('Forward Process: Adding Noise', fontsize=14, pad=20)
+axs[0].set_xlabel('Timesteps', fontsize=12)
+axs[0].set_ylabel('Value', fontsize=12)
+axs[0].legend(fontsize=10)
+
+# Plot 2: Reverse Process (Right)
+axs[1].plot(reverse_data, color='orange', lw=2)
+axs[1].axhline(target_value, color='red', linestyle='--', label="Target value (7)")
+axs[1].axhline(final_noisy_value, color='green', linestyle='--', label=f"Starting noisy value ({final_noisy_value:.2f})")
+axs[1].set_title('Reverse Process: Denoising', fontsize=14, pad=20)
+axs[1].set_xlabel('Timesteps', fontsize=12)
+axs[1].set_ylabel('Value', fontsize=12)
+axs[1].legend(fontsize=10)
+
+# Adjust layout
+plt.tight_layout()
+plt.show()
