@@ -1,0 +1,50 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Target settings
+timesteps = 150
+initial_mean = 14.73
+target_value = 7
+noise_std = 20  # Larger noise for wider distribution at the start
+
+# Generate noisy data for each timestep
+def generate_samples(mean, t, noise_std):
+    std_dev = noise_std * (1 - t / timesteps)  # Noise decreases over time
+    return np.random.normal(mean, std_dev, 1000)
+
+# Create samples for different steps
+samples_step1 = generate_samples(initial_mean, 1, noise_std)
+samples_step75 = generate_samples(initial_mean, 75, noise_std)
+samples_step150 = np.full(1000, target_value)  # At the end, all values converge to target
+
+# Create subplots for each step
+fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+
+# Step 1
+sns.histplot(samples_step1, bins=50, kde=False, color='blue', ax=axs[0])
+axs[0].set_title("Step 1")
+axs[0].set_xlim([-100, 100])
+axs[0].set_xlabel("Value")
+axs[0].set_ylabel("Frequency")
+axs[0].legend(["Timestep 1"])
+
+# Step 75
+sns.histplot(samples_step75, bins=50, kde=False, color='orange', ax=axs[1])
+axs[1].set_title("Step 75")
+axs[1].set_xlim([-100, 100])
+axs[1].set_xlabel("Value")
+axs[1].set_ylabel("Frequency")
+axs[1].legend(["Timestep 75"])
+
+# Step 150 (Converging to target value)
+sns.histplot(samples_step150, bins=50, kde=False, color='green', ax=axs[2])
+axs[2].axvline(target_value, color='green', linestyle='-', linewidth=2, label="Timestep 150")
+axs[2].set_title("Step 150")
+axs[2].set_xlim([-100, 100])
+axs[2].set_xlabel("Value")
+axs[2].set_ylabel("Frequency")
+axs[2].legend(["Timestep 150"])
+
+plt.tight_layout()
+plt.show()
