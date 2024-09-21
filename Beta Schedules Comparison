@@ -1,0 +1,51 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+from torchvision import datasets, transforms
+
+# Step 1: Load CIFAR-10 dataset
+transform = transforms.Compose([transforms.ToTensor()])
+cifar10_data = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+data_loader = torch.utils.data.DataLoader(cifar10_data, batch_size=1, shuffle=True)
+
+# Get one sample from the dataset
+data_iter = iter(data_loader)
+img, _ = next(data_iter)
+img = img.squeeze().numpy()
+
+# Step 2: Define different Beta Schedules
+def linear_beta_schedule(t, steps, beta_min=1e-4, beta_max=0.02):
+    return beta_min + t * (beta_max - beta_min) / (steps - 1)
+
+def cosine_beta_schedule(steps, s=0.008):
+    t = np.arange(steps)
+    f_t = np.cos(((t / steps) + s) / (1 + s) * (np.pi / 2)) ** 2
+    return 1 - f_t / f_t[0]
+
+def optimized_beta_schedule(steps):
+    return np.clip(np.sin(np.linspace(0, np.pi, steps)) ** 2, 1e-4, 0.02)
+
+# Step 3: Generate beta values over steps
+steps = 1000
+t = np.arange(steps)
+
+linear_beta = np.array([linear_beta_schedule(i, steps) for i in t])
+cosine_beta = cosine_beta_schedule(steps)
+optimized_beta = optimized_beta_schedule(steps)
+
+# Step 4: Plot the beta schedules
+plt.figure(figsize=(10, 6))
+plt.plot(t, linear_beta, label='Linear Beta Schedule', color='blue', linewidth=2)
+plt.plot(t, cosine_beta, label='Cosine Beta Schedule', color='green', linewidth=2)
+plt.plot(t, optimized_beta, label='Optimized Beta Schedule', color='red', linewidth=2)
+
+# Step 5: Customize the graph
+plt.title('Comparison of Linear, Cosine, and Optimized Beta Schedules on CIFAR-10', fontsize=16)
+plt.xlabel('Steps', fontsize=14)
+plt.ylabel('Beta Value', fontsize=14)
+plt.legend(loc='upper left', fontsize=12)
+plt.grid(True)
+plt.tight_layout()
+
+# Show the plot
+plt.show()
