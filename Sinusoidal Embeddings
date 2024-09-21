@@ -1,0 +1,38 @@
+class SinusoidalPositionEmbeddings(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, time):
+        '''
+        Code for the Sinusoidal Position Embedding
+        '''
+        # Number of time steps
+        times = time.shape[0]
+        position = torch.arange(0, times, device=time.device).unsqueeze(1)  # Ensure position tensor is on the same device as time
+
+        # The tensor below will store the embeddings
+        sin_cos_pos_emb = torch.zeros(times, self.dim, device=time.device)  # Ensure sin_cos_pos_emb tensor is on the same device as time
+
+        # Calculating the exponent
+        denominator = torch.exp(torch.arange(0, self.dim, 2, device=time.device).float() * -(torch.log(torch.tensor(10000.0, device=time.device))/self.dim))  # Ensure denominator tensor is on the same device as time
+
+        # Calculating the provided embeddings
+        sin_cos_pos_emb[:, 0::2] = torch.sin(position * denominator)
+        sin_cos_pos_emb[:, 1::2] = torch.cos(position * denominator)
+
+        return sin_cos_pos_emb
+
+sin_cos_emb_module = SinusoidalPositionEmbeddings(50)
+
+#Generating embeddings
+pos_emb = sin_cos_emb_module(torch.randint(1, 300, (128,)))
+
+# visualizing the embeddings:
+plt.figure(figsize=(8, 6))
+plt.contourf(pos_emb, cmap='inferno')
+plt.colorbar()
+plt.xlabel('Dimension')
+plt.ylabel('Timestep')
+plt.title('Sinusoidal Position Embeddings')
+plt.show()
