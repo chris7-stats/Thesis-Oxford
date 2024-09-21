@@ -1,0 +1,50 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torchvision.transforms as transforms
+from torchvision.datasets import OxfordIIITPet
+
+# Step 1: Load a high-resolution image from the Oxford Pets dataset
+def load_oxford_pets_image():
+    # Load Oxford-IIIT Pets dataset
+    transform = transforms.Compose([transforms.Resize((128, 128)), transforms.ToTensor()])
+    dataset = OxfordIIITPet(root='./data', split='test', download=True, transform=transform)
+
+    # Get a sample image and convert it to numpy array
+    img, _ = dataset[0]  # Get the first image in the dataset (Cat image)
+    img = img.permute(1, 2, 0).numpy()  # Convert from (C, H, W) to (H, W, C)
+    return img
+
+# Step 2: Reverse the noise addition process
+def reverse_gaussian_noise(img, steps, display_intervals):
+    # Start from pure noise (same shape as the image)
+    noisy_image = np.random.normal(0.5, 0.5, img.shape)
+
+    # Plot the pure noise image
+    fig, axs = plt.subplots(1, len(display_intervals), figsize=(15, 5))
+
+    step_idx = 0
+    for i in range(steps + 1):
+        # Gradually reduce noise at each step to recover the original image
+        alpha = (steps - i) / steps
+        denoised_image = np.clip(alpha * noisy_image + (1 - alpha) * img, 0, 1)
+
+        # Display the image at key intervals
+        if i in display_intervals:
+            axs[step_idx].imshow(denoised_image)
+            axs[step_idx].axis('off')
+            axs[step_idx].set_title(f'Step {i}')
+            step_idx += 1
+
+    # Show the figure
+    plt.show()
+
+# Step 3: Set parameters for the reverse process
+steps = 100  # Total steps of noise reduction
+display_intervals = [0, 10, 50, 100]  # Show the image at the start (pure noise), after 10, 50, and fully denoised
+
+# Step 4: Load the original image
+img = load_oxford_pets_image()
+
+# Step 5: Run the reverse process
+reverse_gaussian_noise(img, steps, display_intervals)
