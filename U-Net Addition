@@ -1,0 +1,204 @@
+import torch
+import torch.nn as nn
+import torchvision
+import numpy as np
+import matplotlib.pyplot as plt
+from torchvision import transforms
+from torch.optim import Adam
+from torch.utils.data import DataLoader
+from torchvision.datasets import MNIST
+from tqdm import trange, tqdm
+from torchvision.utils import make_grid
+import functools
+
+# Load MNIST dataset
+def load_data(batch_size):
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+    dataset = MNIST(root='./data', train=True, transform=transform, download=True)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+# Time Embedding
+class TimeEmbedding(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.register_buffer('W', torch.randn(embed_dim // 2))
+
+    def forward(self, t):
+        half_dim = self.embed_dim // 2
+        emb = t[:, None] * self.W[None, :] * 2 * np.pi
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+        return emb
+
+# Simple U-Net with additive skip connections
+class SimpleUNet(nn.Module):
+    def __init__(self, sigma_fn, in_channels=1, base_channels=32, embed_dim=256):
+        super().__init__()
+        self.sigma_fn = sigma_fn
+        self.time_embed = nn.Sequential(
+            TimeEmbedding(embed_dim),
+            nn.Linear(embed_dim, embed_dim),
+            nn.SiLU(),
+            nn.Linear(embed_dim, embed_dim),
+            nn.SiLU()
+        )
+
+        # Encoder layers
+        self.enc1 = nn.Sequential(
+            nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(8, base_channels),
+            nn.SiLU()
+        )
+        self.enc2 = nn.Sequential(
+            nn.Conv2d(base_channels, base_channels * 2, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, base_channels * 2),
+            nn.SiLU()
+        )
+        self.enc3 = nn.Sequential(
+            nn.Conv2d(base_channels * 2, base_channels * 4, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, base_channels * 4),
+            nn.SiLU()
+        )
+        self.enc4 = nn.Sequential(
+            nn.Conv2d(base_channels * 4, base_channels * 8, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, base_channels * 8),
+            nn.SiLU()
+        )
+
+        # Time embeddings for each level
+        self.time_dense = nn.ModuleDict({
+            'enc1': nn.Linear(embed_dim, base_channels),
+            'enc2': nn.Linear(embed_dim, base_channels * 2),
+            'enc3': nn.Linear(embed_dim, base_channels * 4),
+            'enc4': nn.Linear(embed_dim, base_channels * 8),
+            'dec4': nn.Linear(embed_dim, base_channels * 8),
+            'dec3': nn.Linear(embed_dim, base_channels * 4),
+            'dec2': nn.Linear(embed_dim, base_channels * 2),
+            'dec1': nn.Linear(embed_dim, base_channels)
+        })
+
+        # Decoder layers
+        self.dec4 = nn.Sequential(
+            nn.ConvTranspose2d(base_channels * 8, base_channels * 4, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.GroupNorm(8, base_channels * 4),
+            nn.SiLU()
+        )
+        self.dec3 = nn.Sequential(
+            nn.ConvTranspose2d(base_channels * 4, base_channels * 2, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.GroupNorm(8, base_channels * 2),
+            nn.SiLU()
+        )
+        self.dec2 = nn.Sequential(
+            nn.ConvTranspose2d(base_channels * 2, base_channels, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.GroupNorm(8, base_channels),
+            nn.SiLU()
+        )
+        self.dec1 = nn.Sequential(
+            nn.Conv2d(base_channels, in_channels, kernel_size=3, padding=1)
+        )
+
+    def forward(self, x, t):
+        # Time embedding
+        t_emb = self.time_embed(t)
+        # Encode
+        h1 = self.enc1(x + self.time_dense['enc1'](t_emb)[:, :, None, None])
+        h2 = self.enc2(h1 + self.time_dense['enc2'](t_emb)[:, :, None, None])
+        h3 = self.enc3(h2 + self.time_dense['enc3'](t_emb)[:, :, None, None])
+        h4 = self.enc4(h3 + self.time_dense['enc4'](t_emb)[:, :, None, None])
+
+        # Decode with additive skip connections
+        d4 = self.dec4(h4 + self.time_dense['dec4'](t_emb)[:, :, None, None])
+        d4 = d4 + h3  # Add skip connection
+        d3 = self.dec3(d4 + self.time_dense['dec3'](t_emb)[:, :, None, None])
+        d3 = d3 + h2  # Add skip connection
+        d2 = self.dec2(d3 + self.time_dense['dec2'](t_emb)[:, :, None, None])
+        d2 = d2 + h1  # Add skip connection
+        d1 = self.dec1(d2 + self.time_dense['dec1'](t_emb)[:, :, None, None])
+
+        # Normalize output
+        return d1 / self.sigma_fn(t)[:, None, None, None]
+
+# Marginal standard deviation
+def marginal_prob_std(t, sigma):
+    return torch.sqrt((sigma**(2 * t) - 1) / (2 * np.log(sigma)))
+
+# Diffusion coefficient
+def diffusion_coeff(t, sigma):
+    return sigma**t
+
+# Loss function for score-based model
+def loss_fn(model, x, sigma_fn, eps=1e-5):
+    random_t = torch.rand(x.shape[0], device=x.device) * (1 - eps) + eps
+    z = torch.randn_like(x)
+    sigma = sigma_fn(random_t)
+    perturbed_x = x + z * sigma[:, None, None, None]
+    score = model(perturbed_x, random_t)
+    loss = torch.mean(torch.sum((score * sigma[:, None, None, None] + z)**2, dim=(1, 2, 3)))
+    return loss
+
+# Sampling with Euler-Maruyama
+def euler_maruyama_sampler(model, sigma_fn, diff_coeff_fn, batch_size, img_size, num_steps, device):
+    t = torch.ones(batch_size, device=device)
+    x = torch.randn(batch_size, 1, img_size, img_size, device=device) * sigma_fn(t)[:, None, None, None]
+    time_steps = torch.linspace(1., 1e-3, num_steps, device=device)
+    step_size = time_steps[0] - time_steps[1]
+
+    with torch.no_grad():
+        for time_step in tqdm(time_steps, desc="Sampling"):
+            batch_time_step = torch.ones(batch_size, device=device) * time_step
+            g = diff_coeff_fn(batch_time_step)
+            z = torch.randn_like(x)
+            x_mean = x + (g**2)[:, None, None, None] * model(x, batch_time_step) * step_size
+            x = x_mean + torch.sqrt(step_size) * g[:, None, None, None] * z
+    return x_mean
+
+# Training Loop
+def train_model():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    sigma = 25.0
+    sigma_fn = functools.partial(marginal_prob_std, sigma=sigma)
+    diff_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma)
+
+    # Initialize model and optimizer
+    model = SimpleUNet(sigma_fn).to(device)
+    optimizer = Adam(model.parameters(), lr=2e-4)
+
+    # Load MNIST data
+    batch_size = 128
+    train_loader = load_data(batch_size)
+
+    # Train the model
+    epochs = 10
+    for epoch in trange(epochs, desc="Training"):
+        avg_loss = 0
+        num_items = 0
+        for data, _ in tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False):
+            data = data.to(device)
+            loss = loss_fn(model, data, sigma_fn)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            avg_loss += loss.item() * data.size(0)
+            num_items += data.size(0)
+        print(f"Epoch {epoch+1}, Loss: {avg_loss / num_items}")
+
+    # Save the trained model
+    torch.save(model.state_dict(), "diffusion_model.pth")
+
+    # Sampling
+    model.eval()
+    num_samples = 64
+    img_size = 28
+    num_steps = 500
+    samples = euler_maruyama_sampler(model, sigma_fn, diff_coeff_fn, num_samples, img_size, num_steps, device)
+    samples = samples.clamp(0.0, 1.0)
+
+    # Plot generated samples
+    plt.figure(figsize=(6, 6))
+    plt.axis('off')
+    grid = make_grid(samples, nrow=8).permute(1, 2, 0).cpu().squeeze()
+    plt.imshow(grid, cmap='gray')
+    plt.show()
+
+if __name__ == "__main__":
+    train_model()
