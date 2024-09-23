@@ -1,0 +1,218 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torchvision import transforms, datasets
+import numpy as np
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+# Define a modified version of the residual convolution block
+class EnhancedResidualBlock(nn.Module):
+    def __init__(self, input_channels, output_channels, use_residual=True):
+        super().__init__()
+        self.use_residual = use_residual
+        self.same_channels = (input_channels == output_channels)
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(input_channels, output_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(output_channels),
+            nn.ReLU(),
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(output_channels, output_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(output_channels),
+            nn.ReLU(),
+        )
+
+    def forward(self, x):
+        if self.use_residual:
+            out = self.conv1(x)
+            out = self.conv2(out)
+            if self.same_channels:
+                return (out + x) / np.sqrt(2)  # Scale the residual sum
+            else:
+                return out
+        else:
+            return self.conv2(self.conv1(x))
+
+# Define down-sampling block
+class DownSamplingBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DownSamplingBlock, self).__init__()
+        self.model = nn.Sequential(
+            EnhancedResidualBlock(in_channels, out_channels),
+            nn.MaxPool2d(kernel_size=2)
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+# Define up-sampling block
+class UpSamplingBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(UpSamplingBlock, self).__init__()
+        self.upconv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+        self.conv = nn.Sequential(
+            EnhancedResidualBlock(out_channels, out_channels),
+            EnhancedResidualBlock(out_channels, out_channels)
+        )
+
+    def forward(self, x, skip):
+        x = torch.cat((x, skip), dim=1)
+        x = self.upconv(x)
+        return self.conv(x)
+
+# Embedding the time step and class information into dense layers
+class TimeClassEmbed(nn.Module):
+    def __init__(self, input_dim, embed_dim):
+        super(TimeClassEmbed, self).__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
+
+    def forward(self, x):
+        return self.fc(x.view(x.size(0), -1))
+
+# Defining the U-Net with conditioning
+class ConditionalUNet(nn.Module):
+    def __init__(self, in_channels, base_features=128, num_classes=10):
+        super(ConditionalUNet, self).__init__()
+        self.encoder1 = DownSamplingBlock(in_channels, base_features)
+        self.encoder2 = DownSamplingBlock(base_features, base_features * 2)
+        
+        self.middle = nn.Sequential(
+            nn.AvgPool2d(kernel_size=7),
+            nn.ReLU()
+        )
+        
+        self.time_embed1 = TimeClassEmbed(1, base_features * 2)
+        self.time_embed2 = TimeClassEmbed(1, base_features)
+        self.class_embed1 = TimeClassEmbed(num_classes, base_features * 2)
+        self.class_embed2 = TimeClassEmbed(num_classes, base_features)
+
+        self.up1 = UpSamplingBlock(base_features * 4, base_features)
+        self.up2 = UpSamplingBlock(base_features * 2, in_channels)
+        
+        self.final = nn.Conv2d(base_features, in_channels, kernel_size=3, padding=1)
+
+    def forward(self, x, label, t_step):
+        enc1 = self.encoder1(x)
+        enc2 = self.encoder2(enc1)
+        
+        middle = self.middle(enc2)
+        
+        label_onehot = F.one_hot(label, num_classes=10).float()
+        label_emb1 = self.class_embed1(label_onehot)
+        label_emb2 = self.class_embed2(label_onehot)
+        
+        time_emb1 = self.time_embed1(t_step)
+        time_emb2 = self.time_embed2(t_step)
+        
+        up1 = self.up1(time_emb1 * middle + label_emb1, enc2)
+        up2 = self.up2(time_emb2 * up1 + label_emb2, enc1)
+        
+        return self.final(up2)
+
+# Scheduling functions for noise reduction in DDPM
+def schedule(beta_start, beta_end, num_steps):
+    betas = torch.linspace(beta_start, beta_end, num_steps)
+    alphas = 1.0 - betas
+    alpha_prod = torch.cumprod(alphas, dim=0)
+    
+    return {
+        'betas': betas,
+        'alphas': alphas,
+        'alpha_prod': alpha_prod,
+        'sqrt_alpha_prod': torch.sqrt(alpha_prod),
+        'sqrt_one_minus_alpha_prod': torch.sqrt(1.0 - alpha_prod),
+    }
+
+# Diffusion model
+class DiffusionModel(nn.Module):
+    def __init__(self, unet_model, beta1, beta2, num_steps, device):
+        super(DiffusionModel, self).__init__()
+        self.unet = unet_model.to(device)
+        self.schedule = schedule(beta1, beta2, num_steps)
+        self.num_steps = num_steps
+        self.device = device
+
+    def forward(self, x, label):
+        t = torch.randint(0, self.num_steps, (x.size(0),), device=self.device).float().view(-1, 1)
+        noise = torch.randn_like(x)
+        x_t = self.schedule['sqrt_alpha_prod'][t.long()] * x + self.schedule['sqrt_one_minus_alpha_prod'][t.long()] * noise
+        
+        pred_noise = self.unet(x_t, label, t / self.num_steps)
+        return F.mse_loss(noise, pred_noise)
+
+# Training function for MNIST
+def train_model():
+    epochs = 20
+    batch_size = 256
+    num_timesteps = 400
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    model = DiffusionModel(
+        unet_model=ConditionalUNet(in_channels=1),
+        beta1=1e-4,
+        beta2=0.02,
+        num_steps=num_timesteps,
+        device=device
+    ).to(device)
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    dataset = datasets.MNIST('.', train=True, transform=transforms.ToTensor(), download=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    
+    model.train()
+    for epoch in range(epochs):
+        print(f'Epoch {epoch+1}/{epochs}')
+        running_loss = 0
+        for images, labels in tqdm(dataloader):
+            images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad()
+            loss = model(images, labels)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+        
+        print(f'Loss: {running_loss / len(dataloader)}')
+    torch.save(model.state_dict(), 'diffusion_mnist.pth')
+
+if __name__ == "__main__":
+    train_model()
+
+
+
+
+
+
+
+# Load and use the trained model to generate images
+def generate_images():
+    # Load the trained model
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    ddpm = DDPM(nn_model=ContextUnet(in_channels=1, n_feat=128, n_classes=10), betas=(1e-4, 0.02), n_T=400, device=device, drop_prob=0.1)
+    ddpm.load_state_dict(torch.load('ddpm_mnist.pth', map_location=device))
+    ddpm.eval()
+
+    # Generate images after training is finished
+    with torch.no_grad():
+        n_sample = 10 * 10  # 100 samples (10 rows of 10 columns)
+        x_gen, _ = ddpm.sample(n_sample, (1, 28, 28), ddpm.device, guide_w=0.0)
+
+        # Invert the images: background black, digits white
+        x_gen_inverted = x_gen * -1 + 1
+
+        # Create a grid of images without padding between digits
+        grid = make_grid(x_gen_inverted, nrow=10, padding=0)  # padding=0 removes the grid lines
+
+        # Plot the grid with black background and white digits
+        plt.figure(figsize=(10, 10))
+        plt.imshow(grid.permute(1, 2, 0).cpu().numpy(), cmap='gray', vmin=0, vmax=1)  # Ensure proper contrast
+        plt.axis('off')  # Remove axis
+        plt.show()
+
+# Call the function to generate and display images
+generate_images()
