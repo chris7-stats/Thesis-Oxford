@@ -1,0 +1,22 @@
+import torch
+from torch.nn import functional as F
+import numpy as np
+
+def calculate_inception_score(predictions, num_splits=10):
+    """Calculate the Inception Score (IS)."""
+    # Ensure predictions are probabilities using softmax
+    predictions = F.softmax(torch.tensor(predictions), dim=-1).numpy()
+
+    # Calculate the mean prediction for each class (p(y|x))
+    p_yx = predictions
+    p_y = np.mean(p_yx, axis=0)
+
+    # Calculate Inception Score for each split
+    split_scores = []
+    for i in range(num_splits):
+        part = p_yx[i * (predictions.shape[0] // num_splits):(i + 1) * (predictions.shape[0] // num_splits), :]
+        kl_divergence = part * (np.log(part) - np.log(p_y))
+        kl_divergence = np.mean(np.sum(kl_divergence, axis=1))
+        split_scores.append(np.exp(kl_divergence))
+
+    return np.mean(split_scores), np.std(split_scores)
