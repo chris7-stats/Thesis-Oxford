@@ -1,0 +1,20 @@
+import numpy as np
+from scipy.linalg import sqrtm
+
+def calculate_fid(real_features, fake_features):
+    """Calculate the Frechet Inception Distance (FID) score."""
+    mu_real = np.mean(real_features, axis=0)
+    mu_fake = np.mean(fake_features, axis=0)
+    sigma_real = np.cov(real_features, rowvar=False)
+    sigma_fake = np.cov(fake_features, rowvar=False)
+    
+    # Compute the covariance mean (Sigma_sqrt)
+    cov_sqrt = sqrtm(sigma_real.dot(sigma_fake))
+
+    # If the result contains imaginary components (due to numerical issues), discard them
+    if np.iscomplexobj(cov_sqrt):
+        cov_sqrt = cov_sqrt.real
+
+    fid = np.sum((mu_real - mu_fake) ** 2) + np.trace(sigma_real + sigma_fake - 2 * cov_sqrt)
+    
+    return fid
